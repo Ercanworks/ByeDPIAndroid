@@ -47,7 +47,10 @@ class AppMonitorService : LifecycleService() {
         private val TAG: String = AppMonitorService::class.java.simpleName
         private const val FOREGROUND_SERVICE_ID: Int = 3
         private const val NOTIFICATION_CHANNEL_ID: String = "ByeDPI AppMonitor"
-        private const val POLL_INTERVAL_MS = 2000L
+        private const val POLL_INTERVAL_MS = 1000L
+
+        // Usage access rarely changes, so it's checked less often than the foreground app
+        private const val PERMISSION_CHECK_INTERVAL_MS = 10_000L
 
         // Events are re-read with some overlap, since they can be stored with a small delay
         private const val EVENT_OVERLAP_MS = 5000L
@@ -184,12 +187,18 @@ class AppMonitorService : LifecycleService() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
 
         monitorJob = lifecycleScope.launch {
+            var hasUsageAccess = false
+            var lastPermissionCheck = 0L
             while (isActive) {
-                val hasUsageAccess = ServiceManager.hasUsageStatsPermission(this@AppMonitorService)
-                if (!hasUsageAccess) {
-                    showProblem(R.string.auto_connect_problem_usage_access)
-                } else if (shownProblem == R.string.auto_connect_problem_usage_access) {
-                    showProblem(null)
+                val now = System.currentTimeMillis()
+                if (now - lastPermissionCheck >= PERMISSION_CHECK_INTERVAL_MS) {
+                    lastPermissionCheck = now
+                    hasUsageAccess = ServiceManager.hasUsageStatsPermission(this@AppMonitorService)
+                    if (!hasUsageAccess) {
+                        showProblem(R.string.auto_connect_problem_usage_access)
+                    } else if (shownProblem == R.string.auto_connect_problem_usage_access) {
+                        showProblem(null)
+                    }
                 }
 
                 if (hasUsageAccess && powerManager.isInteractive) {

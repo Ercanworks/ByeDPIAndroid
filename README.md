@@ -13,6 +13,45 @@ Android application that runs a local VPN service to bypass DPI (Deep Packet Ins
 
 This application runs a SOCKS5 proxy [ByeDPI](https://github.com/hufrea/byedpi) and redirects all traffic through it.
 
+## About this fork
+
+This is a fork of [dovecoteescapee/ByeDPIAndroid](https://github.com/dovecoteescapee/ByeDPIAndroid) with these additions:
+
+### Per-app auto-connect
+
+Settings → **Auto-connect**: pick an app, and ByeDPI connects as soon as that app is opened.
+
+- **Disconnect after leaving the app**: never, or after 3 s / 5 s / 15 s / 1 min / 5 min. Coming back within that time keeps the connection. Turning the screen off doesn't count as leaving, only switching to another app does.
+- **Mobile data only**: don't auto-connect while on WiFi.
+- Connections you start or stop by hand are left alone: a connection you started yourself is never stopped by auto-connect, and if you disconnect while using the app, it doesn't reconnect until the app is opened again.
+- Starts again after a reboot or an app update. Needs the usage access permission to see which app is open; enabling it also asks to exempt ByeDPI from battery optimization, since otherwise the system may stop it in the background (on Samsung, also add ByeDPI to "Never sleeping apps").
+
+### Shortcuts and automation
+
+- Long-press the app icon for **Connect** and **Disconnect** shortcuts that work without opening the app.
+- Automation apps (Tasker, MacroDroid, Samsung Routines, ...) can send these broadcasts to `io.github.dovecoteescapee.byedpi/.receivers.ActionReceiver`:
+
+  | Action | Effect |
+  |---|---|
+  | `io.github.dovecoteescapee.byedpi.ACTION_CONNECT` | Connect |
+  | `io.github.dovecoteescapee.byedpi.ACTION_DISCONNECT` | Disconnect |
+  | `io.github.dovecoteescapee.byedpi.ACTION_TOGGLE` | Toggle |
+
+  ```bash
+  adb shell am broadcast -a io.github.dovecoteescapee.byedpi.ACTION_CONNECT -n io.github.dovecoteescapee.byedpi/.receivers.ActionReceiver
+  ```
+
+  The VPN permission has to be granted once by connecting from the app.
+
+### Other changes
+
+- Native libraries are aligned to 16 KB pages, as needed by newer Android devices.
+- Turkish translation for the strings added in this fork.
+
+### Installing
+
+There are no releases of this fork. Every push builds a debug APK, which can be downloaded from the latest [Actions](https://github.com/Ercanworks/ByeDPIAndroid/actions) run. It uses the same package name as the original app, so it replaces it; since each build is signed with a different debug key, the installed app has to be uninstalled first (which resets its settings). Building it yourself needs JDK 17.
+
 ## Installation
 
 [<img src="https://github.com/machiav3lli/oandbackupx/blob/034b226cea5c1b30eb4f6a6f313e4dadcbb0ece4/badge_github.png"

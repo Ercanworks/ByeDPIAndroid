@@ -1,6 +1,7 @@
 package io.github.dovecoteescapee.byedpi.fragments
 
 import android.app.Dialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ResolveInfo
 import android.graphics.drawable.Drawable
@@ -15,9 +16,13 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.github.dovecoteescapee.byedpi.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class AppPickerDialogFragment : DialogFragment() {
 
@@ -39,8 +44,8 @@ class AppPickerDialogFragment : DialogFragment() {
         val searchEdit = view.findViewById<EditText>(R.id.search_edit)
         val recyclerView = view.findViewById<RecyclerView>(R.id.app_list)
 
-        val apps = loadApps()
-        val adapter = AppAdapter(apps.toMutableList()) { app ->
+        var apps: List<AppInfo> = emptyList()
+        val adapter = AppAdapter(mutableListOf()) { app ->
             parentFragmentManager.setFragmentResult(RESULT_KEY, Bundle().apply {
                 putString(RESULT_PACKAGE, app.packageName)
                 putString(RESULT_APP_NAME, app.name)
@@ -60,6 +65,14 @@ class AppPickerDialogFragment : DialogFragment() {
             }
         })
 
+        // Loading every app with its icon takes a while on phones with many apps
+        // (the application context stays valid even if the dialog is closed meanwhile)
+        val appContext = requireContext().applicationContext
+        lifecycleScope.launch {
+            apps = withContext(Dispatchers.IO) { loadApps(appContext) }
+            adapter.filter(apps, searchEdit.text.toString().lowercase())
+        }
+
         return AlertDialog.Builder(requireContext())
             .setTitle(R.string.auto_connect_app_picker_title)
             .setView(view)
@@ -67,11 +80,11 @@ class AppPickerDialogFragment : DialogFragment() {
             .create()
     }
 
-    private fun loadApps(): List<AppInfo> {
-        val pm = requireContext().packageManager
+    private fun loadApps(context: Context): List<AppInfo> {
+        val pm = context.packageManager
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val resolveInfos: List<ResolveInfo> = pm.queryIntentActivities(intent, 0)
-        val myPackage = requireContext().packageName
+        val myPackage = context.packageName
 
         return resolveInfos
             .filter { it.activityInfo.packageName != myPackage }

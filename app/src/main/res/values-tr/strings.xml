@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the strings added in this fork are translated; the rest of the app is English -->
+<resources>
+    <string name="auto_connect_category">Otomatik bağlanma</string>
+    <string name="auto_connect_enabled_title">Uygulama için otomatik bağlan</string>
+    <string name="auto_connect_enabled_summary">Seçilen uygulama açılınca otomatik olarak bağlan</string>
+    <string name="auto_connect_app_picker_title">Uygulama seç</string>
+    <string name="auto_connect_app_picker_summary">Uygulama seçilmedi</string>
+    <string name="auto_connect_mobile_only_title">Sadece mobil veride</string>
+    <string name="auto_connect_mobile_only_summary">Wi-Fi\'dayken otomatik bağlanma</string>
+    <string name="auto_connect_disconnect_delay_title">Uygulamadan çıkınca bağlantıyı kes</string>
+    <string name="auto_connect_disconnect_never">Hiçbir zaman</string>
+    <string name="auto_connect_disconnect_15s">15 saniye sonra</string>
+    <string name="auto_connect_disconnect_1m">1 dakika sonra</string>
+    <string name="auto_connect_disconnect_5m">5 dakika sonra</string>
+    <string name="auto_connect_notification_title">ByeDPI otomatik bağlanma</string>
+    <string name="auto_connect_notification_content">%1$s bekleniyor</string>
+    <string name="auto_connect_channel_name">Otomatik bağlanma</string>
+    <string name="auto_connect_problem_usage_access">Kullanım erişimi izni yok. Vermek için dokun.</string>
+    <string name="auto_connect_problem_vpn_permission">VPN izni yok. İzni vermek için ByeDPI\'da bir kez bağlan.</string>
+    <string name="usage_access_required">Uygulamaların açıldığını algılamak için kullanım erişimi gerekiyor. Lütfen ByeDPI\'a bu izni ver.</string>
+    <string name="battery_optimization_title">Otomatik bağlanma çalışmaya devam etsin</string>
+    <string name="battery_optimization_message">Pil optimizasyonu otomatik bağlanmayı arka planda durdurabilir. ByeDPI kısıtlama olmadan çalışabilsin mi?\n\nSamsung telefonlarda ayrıca pil ayarlarından ByeDPI\'ı \"Hiç uyutulmayan uygulamalar\" listesine ekle.</string>
+    <string name="battery_optimization_allow">İzin ver</string>
+    <string name="search_hint">Uygulama ara</string>
+    <string name="vpn_permission_required_open_app">VPN izni vermek için uygulamada bir kez bağlan</string>
+    <string name="shortcut_connect">Bağlan</string>
+    <string name="shortcut_connect_long">ByeDPI\'ı başlat</string>
+    <string name="shortcut_disconnect">Kes</string>
+    <string name="shortcut_disconnect_long">ByeDPI\'ı durdur</string>
+</resources>

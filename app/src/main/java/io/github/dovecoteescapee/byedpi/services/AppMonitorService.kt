@@ -11,11 +11,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import io.github.dovecoteescapee.byedpi.R
@@ -41,10 +43,16 @@ class AppMonitorService : LifecycleService() {
     }
 
     private var monitorJob: Job? = null
+    private var disconnectJob: Job? = null
     private var targetPackage: String? = null
     private var wasTargetInForeground = false
     private var manualOverride = false
     private var autoInitiatedAction = false
+
+    // How long to wait after Discord leaves foreground before disconnecting.
+    // This prevents disconnection when opening notification panel, switching
+    // briefly to another app, or using the recent apps screen.
+    private val DISCONNECT_GRACE_MS = 15_000L
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -94,6 +102,7 @@ class AppMonitorService : LifecycleService() {
         super.onDestroy()
         unregisterReceiver(statusReceiver)
         monitorJob?.cancel()
+        disconnectJob?.cancel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -169,6 +178,12 @@ class AppMonitorService : LifecycleService() {
             return
         }
 
+        // Network check
+        if (!isAutoConnectAllowedOnCurrentNetwork()) {
+            Log.i(TAG, "Auto-connect blocked by network settings")
+            return
+        }
+
         val mode = getPreferences().mode()
         if (mode == Mode.VPN && VpnService.prepare(this) != null) {
             Log.w(TAG, "VPN permission not granted, cannot auto-connect")
@@ -200,6 +215,78 @@ class AppMonitorService : LifecycleService() {
         autoInitiatedAction = false
     }
 
+    /**
+     * Returns true if auto-connect should proceed on the current network.
+     * Checks:
+     * 1. "Mobile only" switch → block if on WiFi
+     * 2. WiFi exceptions list → block if current SSID is in the list
+     */
+    @SuppressLint("MissingPermission")
+    private fun isAutoConnectAllowedOnCurrentNetwork(): Boolean {
+        val prefs = getPreferences()
+        val mobileOnly = prefs.getBoolean("auto_connect_mobile_only", false)
+        val exceptionsRaw = prefs.getString("auto_connect_wifi_exceptions", "") ?: ""
+
+        val onWifi = isOnWifi()
+
+        // If mobile only → block when on WiFi
+        if (mobileOnly && onWifi) {
+            Log.i(TAG, "Blocked: mobile-only mode, currently on WiFi")
+            return false
+        }
+
+        // If there are WiFi exceptions → check current SSID
+        if (onWifi && exceptionsRaw.isNotBlank()) {
+            val currentSsid = getCurrentSsid()
+            if (currentSsid != null) {
+                val exceptions = exceptionsRaw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                if (exceptions.any { it.equals(currentSsid, ignoreCase = true) }) {
+                    Log.i(TAG, "Blocked: WiFi '$currentSsid' is in exceptions list")
+                    return false
+                }
+            }
+        }
+
+        return true
+    }
+
+    private fun isOnWifi(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        } else {
+            @Suppress("DEPRECATION")
+            cm.activeNetworkInfo?.type == ConnectivityManager.TYPE_WIFI
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun getCurrentSsid(): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+: get SSID from NetworkCapabilities
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val network = cm?.activeNetwork ?: return null
+                val caps = cm.getNetworkCapabilities(network) ?: return null
+                // TransportInfo contains WifiInfo on Android 10+
+                val wifiInfo = caps.transportInfo
+                if (wifiInfo is android.net.wifi.WifiInfo) {
+                    wifiInfo.ssid?.removeSurrounding("\"")
+                } else null
+            } else {
+                @Suppress("DEPRECATION")
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                @Suppress("DEPRECATION")
+                wm?.connectionInfo?.ssid?.removeSurrounding("\"")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get SSID", e)
+            null
+        }
+    }
+
     private fun getForegroundPackage(): String? {
         val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
             ?: return null
@@ -216,9 +303,49 @@ class AppMonitorService : LifecycleService() {
         if (usageStats.isNullOrEmpty()) return null
 
         return usageStats
-            .filter { it.lastTimeUsed > 0 }
+            .filter { it.lastTimeUsed > 0 && !isSystemUiPackage(it.packageName) }
             .maxByOrNull { it.lastTimeUsed }
             ?.packageName
+    }
+
+    /**
+     * Returns true for system overlay packages that should not affect
+     * foreground detection: notification panel, launchers, recents, etc.
+     * We check if the package has a launcher activity — if not, it's a
+     * system overlay (like SystemUI) and we ignore it.
+     */
+    private fun isSystemUiPackage(packageName: String): Boolean {
+        // Always ignore own package
+        if (packageName == this.packageName) return true
+
+        // Always ignore known system UI packages across OEMs
+        val knownSystemUi = setOf(
+            "com.android.systemui",
+            "com.android.launcher",
+            "com.android.launcher2",
+            "com.android.launcher3",
+            "com.google.android.apps.nexuslauncher",
+            "com.samsung.android.app.spage",
+            "com.samsung.android.app.cocktailbarservice",
+            "com.sec.android.app.launcher",
+            "com.huawei.android.launcher",
+            "com.miui.home",
+            "com.oneplus.launcher",
+            "com.oppo.launcher",
+            "com.vivo.launcher"
+        )
+        if (packageName in knownSystemUi) return true
+
+        // For any other package: check if it has a launcher activity.
+        // System overlays (notification shade, recents, etc.) typically don't.
+        return try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+                .setPackage(packageName)
+            packageManager.queryIntentActivities(intent, 0).isEmpty()
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun registerNotificationChannel() {

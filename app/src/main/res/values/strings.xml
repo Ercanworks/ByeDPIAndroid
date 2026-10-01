@@ -82,6 +82,12 @@
     <string name="auto_connect_channel_name">Auto-connect</string>
     <string name="usage_access_required">Usage access permission is required to detect when apps are opened. Please grant it in Settings.</string>
     <string name="search_hint">Search apps</string>
+    <string name="auto_connect_network_category">Network</string>
+    <string name="auto_connect_mobile_only_title">Mobile data only</string>
+    <string name="auto_connect_mobile_only_summary">Auto-connect only when using mobile data, not WiFi</string>
+    <string name="auto_connect_wifi_exceptions_title">WiFi exceptions</string>
+    <string name="auto_connect_wifi_exceptions_summary">Auto-connect will be disabled on these WiFi networks (one per line)</string>
+    <string name="auto_connect_wifi_exceptions_hint">Home WiFi&#10;Work Network</string>
     <string name="shortcut_connect">Connect</string>
     <string name="shortcut_connect_long">Connect ByeDPI</string>
     <string name="shortcut_disconnect">Disconnect</string>

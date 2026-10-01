@@ -150,9 +150,9 @@ class AppMonitorService : LifecycleService() {
             // ACTION_START_MONITOR, or a restart by the system after being killed
             else -> {
                 val prefs = getPreferences()
-                targetPackage = prefs.getString("auto_connect_package", null)
+                val newTarget = prefs.getString("auto_connect_package", null)
 
-                if (!prefs.getBoolean("auto_connect_enabled", false) || targetPackage == null) {
+                if (!prefs.getBoolean("auto_connect_enabled", false) || newTarget == null) {
                     Log.w(TAG, "Auto-connect is disabled or no app is selected")
                     // A service started with startForegroundService must go foreground even when quitting
                     startForegroundNotification()
@@ -160,8 +160,14 @@ class AppMonitorService : LifecycleService() {
                     return START_NOT_STICKY
                 }
 
+                // Started again while already watching the same app (e.g. the main screen
+                // was opened): keep the current session, a pending disconnect included
+                val alreadyMonitoring = monitorJob?.isActive == true && newTarget == targetPackage
+                targetPackage = newTarget
                 startForegroundNotification()
-                startMonitoring()
+                if (!alreadyMonitoring) {
+                    startMonitoring()
+                }
                 START_STICKY
             }
         }

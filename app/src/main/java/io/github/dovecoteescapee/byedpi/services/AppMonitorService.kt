@@ -90,8 +90,13 @@ class AppMonitorService : LifecycleService() {
     // The monitor then leaves the connection alone until the app is opened anew.
     private var userOverride = false
 
-    private var expectedStatus: AppStatus? = null
-    private var expectedStatusTime = 0L
+    // Status broadcasts the monitor's own starts and stops will cause, oldest first.
+    // A list, since a stop and the next start can both still be pending when
+    // the user leaves the app and comes right back.
+    private val expectedChanges = mutableListOf<Pair<AppStatus, Long>>()
+
+    // Connecting failed in this session; don't keep retrying until the app is opened anew
+    private var connectFailed = false
 
     private var shownProblem: Int? = null
 
@@ -107,7 +112,8 @@ class AppMonitorService : LifecycleService() {
                     Log.w(TAG, "Connection failed")
                     connectedByMonitor = false
                     // A failed start is followed by a stop broadcast, which isn't the user's doing
-                    if (expectedStatus == AppStatus.Running) {
+                    if (consumeExpected(AppStatus.Running)) {
+                        connectFailed = true
                         expect(AppStatus.Halted)
                     }
                 }
@@ -270,6 +276,7 @@ class AppMonitorService : LifecycleService() {
 
         if (!returnedWithinGrace) {
             userOverride = false
+            connectFailed = false
         }
 
         if (userOverride) {
@@ -301,19 +308,19 @@ class AppMonitorService : LifecycleService() {
             return
         }
 
-        expect(AppStatus.Running)
+        // Status broadcasts are delivered on this thread too, so recording the
+        // expectation after starting can't miss the broadcast
         when (ServiceManager.connect(this)) {
             ServiceManager.ConnectResult.Started -> {
+                expect(AppStatus.Running)
                 connectedByMonitor = true
                 showProblem(null)
             }
 
-            ServiceManager.ConnectResult.AlreadyRunning -> {
-                expectedStatus = null
-            }
+            // Possibly still stopping after our own disconnect; handled once that's done
+            ServiceManager.ConnectResult.AlreadyRunning -> {}
 
             ServiceManager.ConnectResult.VpnPermissionRequired -> {
-                expectedStatus = null
                 showProblem(R.string.auto_connect_problem_vpn_permission)
             }
         }
@@ -321,23 +328,37 @@ class AppMonitorService : LifecycleService() {
 
     private fun disconnectByMonitor() {
         Log.i(TAG, "Disconnecting after leaving $targetPackage")
-        expect(AppStatus.Halted)
-        if (!ServiceManager.disconnect(this)) {
-            expectedStatus = null
+        if (ServiceManager.disconnect(this)) {
+            expect(AppStatus.Halted)
         }
         connectedByMonitor = false
     }
 
     private fun expect(status: AppStatus) {
-        expectedStatus = status
-        expectedStatusTime = System.currentTimeMillis()
+        expectedChanges.add(status to System.currentTimeMillis())
+    }
+
+    /** Removes and reports the oldest pending expectation for [status], if any. */
+    private fun consumeExpected(status: AppStatus): Boolean {
+        val now = System.currentTimeMillis()
+        expectedChanges.removeAll { (_, time) -> now - time >= OWN_ACTION_WINDOW_MS }
+        val index = expectedChanges.indexOfFirst { (expected, _) -> expected == status }
+        if (index < 0) return false
+        expectedChanges.removeAt(index)
+        return true
     }
 
     private fun onStatusChanged(status: AppStatus) {
-        val expected = expectedStatus == status &&
-            System.currentTimeMillis() - expectedStatusTime < OWN_ACTION_WINDOW_MS
-        if (expected) {
-            expectedStatus = null
+        if (consumeExpected(status)) {
+            // Our own disconnect finished, but the user is already back in the app.
+            // Unless a connect is on its way anyway, connect again.
+            val connectPending = expectedChanges.any { (expected, _) -> expected == AppStatus.Running }
+            if (status == AppStatus.Halted && targetInForeground &&
+                !userOverride && !connectFailed && !connectPending
+            ) {
+                Log.i(TAG, "Back in $targetPackage while disconnecting, connecting again")
+                connectIfAllowed()
+            }
             return
         }
 

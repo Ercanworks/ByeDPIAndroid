@@ -58,12 +58,14 @@
             android:defaultValue="false"
             android:dependency="auto_connect_enabled" />
 
-        <com.takisoft.preferencex.EditTextPreference
-            android:key="auto_connect_wifi_exceptions"
-            android:title="@string/auto_connect_wifi_exceptions_title"
-            android:summary="@string/auto_connect_wifi_exceptions_summary"
-            android:defaultValue=""
-            android:dependency="auto_connect_enabled" />
+        <DropDownPreference
+            android:key="auto_connect_disconnect_delay"
+            android:title="@string/auto_connect_disconnect_delay_title"
+            android:entries="@array/auto_connect_disconnect_delays"
+            android:entryValues="@array/auto_connect_disconnect_delays_entries"
+            android:defaultValue="15"
+            android:dependency="auto_connect_enabled"
+            app:useSimpleSummaryProvider="true" />
 
     </androidx.preference.PreferenceCategory>
 

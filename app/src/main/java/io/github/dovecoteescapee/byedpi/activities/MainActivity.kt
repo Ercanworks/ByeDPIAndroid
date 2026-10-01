@@ -159,6 +159,9 @@ class MainActivity : AppCompatActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+
+        // Brings the auto-connect monitor back if the system has killed it
+        ServiceManager.startMonitorIfEnabled(this)
     }
 
     override fun onResume() {

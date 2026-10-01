@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -13,10 +14,11 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.net.VpnService
-import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import androidx.annotation.StringRes
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
@@ -24,49 +26,86 @@ import io.github.dovecoteescapee.byedpi.R
 import io.github.dovecoteescapee.byedpi.activities.MainActivity
 import io.github.dovecoteescapee.byedpi.data.*
 import io.github.dovecoteescapee.byedpi.utility.getPreferences
-import io.github.dovecoteescapee.byedpi.utility.mode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+/**
+ * Connects when the selected app comes to the foreground and, depending on
+ * the settings, disconnects again some time after the user has left it.
+ *
+ * The foreground app is followed through usage events: every time an app's
+ * activity is resumed, that app becomes the foreground app. Pausing alone
+ * (e.g. turning the screen off during a voice call) doesn't count as leaving.
+ */
 class AppMonitorService : LifecycleService() {
 
     companion object {
         private val TAG: String = AppMonitorService::class.java.simpleName
         private const val FOREGROUND_SERVICE_ID: Int = 3
         private const val NOTIFICATION_CHANNEL_ID: String = "ByeDPI AppMonitor"
-        private const val POLL_INTERVAL_MS = 2500L
+        private const val POLL_INTERVAL_MS = 2000L
+
+        // Events are re-read with some overlap, since they can be stored with a small delay
+        private const val EVENT_OVERLAP_MS = 5000L
+
+        // How far back to look for the current foreground app when monitoring starts
+        private const val INITIAL_LOOKBACK_MS = 60 * 60 * 1000L
+
+        // A status broadcast arriving this soon after our own start/stop was caused by us
+        private const val OWN_ACTION_WINDOW_MS = 15_000L
+
+        // With "never disconnect", leaving the app for this long still ends the session
+        private const val SESSION_END_GRACE_MS = 15_000L
+
+        // UsageEvents.Event.ACTIVITY_RESUMED, called MOVE_TO_FOREGROUND before API 29
+        private const val EVENT_ACTIVITY_RESUMED = 1
+
+        // Windows of these packages appear on top of the current app without the user leaving it
+        private val IGNORED_PACKAGES = setOf("com.android.systemui")
 
         const val ACTION_START_MONITOR = "start_monitor"
         const val ACTION_STOP_MONITOR = "stop_monitor"
     }
 
     private var monitorJob: Job? = null
-    private var disconnectJob: Job? = null
+    private var sessionEndJob: Job? = null
     private var targetPackage: String? = null
-    private var wasTargetInForeground = false
-    private var manualOverride = false
-    private var autoInitiatedAction = false
 
-    // How long to wait after Discord leaves foreground before disconnecting.
-    // This prevents disconnection when opening notification panel, switching
-    // briefly to another app, or using the recent apps screen.
-    private val DISCONNECT_GRACE_MS = 15_000L
+    private var foregroundPackage: String? = null
+    private var lastQueryTime = 0L
+    private var targetInForeground = false
+
+    // The monitor started the current connection, so it may also stop it.
+    // A connection the user started by hand is never stopped by the monitor.
+    private var connectedByMonitor = false
+
+    // The user connected or disconnected by hand while the target app was in use.
+    // The monitor then leaves the connection alone until the app is opened anew.
+    private var userOverride = false
+
+    private var expectedStatus: AppStatus? = null
+    private var expectedStatusTime = 0L
+
+    private var shownProblem: Int? = null
+
+    private val sessionActive: Boolean
+        get() = targetInForeground || sessionEndJob?.isActive == true
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                STOPPED_BROADCAST -> {
-                    if (!autoInitiatedAction && wasTargetInForeground) {
-                        Log.i(TAG, "Manual disconnect detected, setting override")
-                        manualOverride = true
-                    }
-                }
-                STARTED_BROADCAST -> {
-                    if (!autoInitiatedAction && wasTargetInForeground) {
-                        Log.i(TAG, "Manual connect detected, clearing override")
-                        manualOverride = false
+                STARTED_BROADCAST -> onStatusChanged(AppStatus.Running)
+                STOPPED_BROADCAST -> onStatusChanged(AppStatus.Halted)
+                FAILED_BROADCAST -> {
+                    Log.w(TAG, "Connection failed")
+                    connectedByMonitor = false
+                    // A failed start is followed by a stop broadcast, which isn't the user's doing
+                    if (expectedStatus == AppStatus.Running) {
+                        expect(AppStatus.Halted)
                     }
                 }
             }
@@ -77,24 +116,17 @@ class AppMonitorService : LifecycleService() {
         super.onCreate()
         registerNotificationChannel()
 
+        val filter = IntentFilter().apply {
+            addAction(STARTED_BROADCAST)
+            addAction(STOPPED_BROADCAST)
+            addAction(FAILED_BROADCAST)
+        }
+
         @SuppressLint("UnspecifiedRegisterReceiverFlag")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(
-                statusReceiver,
-                IntentFilter().apply {
-                    addAction(STARTED_BROADCAST)
-                    addAction(STOPPED_BROADCAST)
-                },
-                RECEIVER_EXPORTED
-            )
+            registerReceiver(statusReceiver, filter, RECEIVER_EXPORTED)
         } else {
-            registerReceiver(
-                statusReceiver,
-                IntentFilter().apply {
-                    addAction(STARTED_BROADCAST)
-                    addAction(STOPPED_BROADCAST)
-                }
-            )
+            registerReceiver(statusReceiver, filter)
         }
     }
 
@@ -102,59 +134,71 @@ class AppMonitorService : LifecycleService() {
         super.onDestroy()
         unregisterReceiver(statusReceiver)
         monitorJob?.cancel()
-        disconnectJob?.cancel()
+        sessionEndJob?.cancel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
-        when (intent?.action) {
-            ACTION_START_MONITOR -> {
-                startForegroundNotification()
-                startMonitoring()
-                return START_STICKY
-            }
+        return when (intent?.action) {
             ACTION_STOP_MONITOR -> {
                 stopMonitoring()
                 stopSelf()
-                return START_NOT_STICKY
+                START_NOT_STICKY
             }
+
+            // ACTION_START_MONITOR, or a restart by the system after being killed
             else -> {
-                // Restarted by system after being killed
-                if (getPreferences().getBoolean("auto_connect_enabled", false)) {
+                val prefs = getPreferences()
+                targetPackage = prefs.getString("auto_connect_package", null)
+
+                if (!prefs.getBoolean("auto_connect_enabled", false) || targetPackage == null) {
+                    Log.w(TAG, "Auto-connect is disabled or no app is selected")
+                    // A service started with startForegroundService must go foreground even when quitting
                     startForegroundNotification()
-                    startMonitoring()
-                    return START_STICKY
+                    stopSelf()
+                    return START_NOT_STICKY
                 }
-                stopSelf()
-                return START_NOT_STICKY
+
+                startForegroundNotification()
+                startMonitoring()
+                START_STICKY
             }
         }
     }
 
     private fun startMonitoring() {
-        val prefs = getPreferences()
-        targetPackage = prefs.getString("auto_connect_package", null)
-
-        if (targetPackage == null) {
-            Log.w(TAG, "No target package configured")
-            stopSelf()
-            return
-        }
-
         monitorJob?.cancel()
+        sessionEndJob?.cancel()
+        foregroundPackage = null
+        lastQueryTime = 0L
+        targetInForeground = false
+        userOverride = false
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+
         monitorJob = lifecycleScope.launch {
             while (isActive) {
-                val foregroundPkg = getForegroundPackage()
-                val isTargetForeground = foregroundPkg == targetPackage
-
-                if (isTargetForeground && !wasTargetInForeground) {
-                    onTargetAppOpened()
-                } else if (!isTargetForeground && wasTargetInForeground) {
-                    onTargetAppClosed()
+                val hasUsageAccess = ServiceManager.hasUsageStatsPermission(this@AppMonitorService)
+                if (!hasUsageAccess) {
+                    showProblem(R.string.auto_connect_problem_usage_access)
+                } else if (shownProblem == R.string.auto_connect_problem_usage_access) {
+                    showProblem(null)
                 }
 
-                wasTargetInForeground = isTargetForeground
+                if (hasUsageAccess && powerManager.isInteractive) {
+                    // Nothing can be opened while the screen is off, so skip polling then
+                    val foreground = withContext(Dispatchers.IO) { queryForegroundPackage() }
+                    val isTargetForeground = foreground == targetPackage
+
+                    if (isTargetForeground && !targetInForeground) {
+                        targetInForeground = true
+                        onTargetAppOpened()
+                    } else if (!isTargetForeground && targetInForeground) {
+                        targetInForeground = false
+                        onTargetAppLeft()
+                    }
+                }
                 delay(POLL_INTERVAL_MS)
             }
         }
@@ -165,89 +209,142 @@ class AppMonitorService : LifecycleService() {
     private fun stopMonitoring() {
         monitorJob?.cancel()
         monitorJob = null
+        sessionEndJob?.cancel()
+        sessionEndJob = null
         Log.i(TAG, "Stopped monitoring")
     }
 
-    private fun onTargetAppOpened() {
-        Log.i(TAG, "Target app opened: $targetPackage")
-        manualOverride = false
-
-        val (status, _) = appStatus
-        if (status == AppStatus.Running) {
-            Log.i(TAG, "Already connected")
-            return
-        }
-
-        // Network check
-        if (!isAutoConnectAllowedOnCurrentNetwork()) {
-            Log.i(TAG, "Auto-connect blocked by network settings")
-            return
-        }
-
-        val mode = getPreferences().mode()
-        if (mode == Mode.VPN && VpnService.prepare(this) != null) {
-            Log.w(TAG, "VPN permission not granted, cannot auto-connect")
-            return
-        }
-
-        autoInitiatedAction = true
-        ServiceManager.start(this, mode)
-        autoInitiatedAction = false
-    }
-
-    private fun onTargetAppClosed() {
-        Log.i(TAG, "Target app closed: $targetPackage")
-
-        if (manualOverride) {
-            Log.i(TAG, "Manual override active, resetting")
-            manualOverride = false
-            return
-        }
-
-        val (status, _) = appStatus
-        if (status == AppStatus.Halted) {
-            Log.i(TAG, "Already disconnected")
-            return
-        }
-
-        autoInitiatedAction = true
-        ServiceManager.stop(this)
-        autoInitiatedAction = false
-    }
-
     /**
-     * Returns true if auto-connect should proceed on the current network.
-     * Checks:
-     * 1. "Mobile only" switch → block if on WiFi
-     * 2. WiFi exceptions list → block if current SSID is in the list
+     * Applies the usage events since the last query and returns the current foreground app.
+     * Only ever called from the monitor loop, one call at a time.
      */
-    @SuppressLint("MissingPermission")
-    private fun isAutoConnectAllowedOnCurrentNetwork(): Boolean {
-        val prefs = getPreferences()
-        val mobileOnly = prefs.getBoolean("auto_connect_mobile_only", false)
-        val exceptionsRaw = prefs.getString("auto_connect_wifi_exceptions", "") ?: ""
+    private fun queryForegroundPackage(): String? {
+        val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            ?: return foregroundPackage
 
-        val onWifi = isOnWifi()
-
-        // If mobile only → block when on WiFi
-        if (mobileOnly && onWifi) {
-            Log.i(TAG, "Blocked: mobile-only mode, currently on WiFi")
-            return false
+        val now = System.currentTimeMillis()
+        val begin = if (lastQueryTime == 0L) {
+            now - INITIAL_LOOKBACK_MS
+        } else {
+            lastQueryTime - EVENT_OVERLAP_MS
         }
+        lastQueryTime = now
 
-        // If there are WiFi exceptions → check current SSID
-        if (onWifi && exceptionsRaw.isNotBlank()) {
-            val currentSsid = getCurrentSsid()
-            if (currentSsid != null) {
-                val exceptions = exceptionsRaw.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                if (exceptions.any { it.equals(currentSsid, ignoreCase = true) }) {
-                    Log.i(TAG, "Blocked: WiFi '$currentSsid' is in exceptions list")
-                    return false
-                }
+        val events = usageStatsManager.queryEvents(begin, now) ?: return foregroundPackage
+        val event = UsageEvents.Event()
+        // Events come in chronological order, so the last resumed app wins.
+        // Re-reading the overlap is harmless: it replays the same order.
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            if (event.eventType == EVENT_ACTIVITY_RESUMED && !isIgnoredPackage(event.packageName)) {
+                foregroundPackage = event.packageName
             }
         }
 
-        return true
+        return foregroundPackage
+    }
+
+    private fun isIgnoredPackage(packageName: String): Boolean =
+        packageName == this.packageName || packageName in IGNORED_PACKAGES
+
+    private fun onTargetAppOpened() {
+        Log.i(TAG, "Target app opened: $targetPackage")
+
+        val returnedWithinGrace = sessionEndJob?.isActive == true
+        sessionEndJob?.cancel()
+
+        if (!returnedWithinGrace) {
+            userOverride = false
+        }
+
+        if (userOverride) {
+            Log.i(TAG, "User took over the connection in this session, not connecting")
+            return
+        }
+
+        connectIfAllowed()
+    }
+
+    private fun onTargetAppLeft() {
+        Log.i(TAG, "Target app left: $targetPackage")
+
+        val disconnectDelayMs = getDisconnectDelayMs()
+        sessionEndJob = lifecycleScope.launch {
+            delay(disconnectDelayMs ?: SESSION_END_GRACE_MS)
+
+            if (disconnectDelayMs != null && connectedByMonitor && !userOverride) {
+                disconnectByMonitor()
+            }
+            userOverride = false
+            Log.i(TAG, "Session ended")
+        }
+    }
+
+    private fun connectIfAllowed() {
+        if (!isAllowedOnCurrentNetwork()) {
+            Log.i(TAG, "Blocked: mobile data only, currently on WiFi")
+            return
+        }
+
+        expect(AppStatus.Running)
+        when (ServiceManager.connect(this)) {
+            ServiceManager.ConnectResult.Started -> {
+                connectedByMonitor = true
+                showProblem(null)
+            }
+
+            ServiceManager.ConnectResult.AlreadyRunning -> {
+                expectedStatus = null
+            }
+
+            ServiceManager.ConnectResult.VpnPermissionRequired -> {
+                expectedStatus = null
+                showProblem(R.string.auto_connect_problem_vpn_permission)
+            }
+        }
+    }
+
+    private fun disconnectByMonitor() {
+        Log.i(TAG, "Disconnecting after leaving $targetPackage")
+        expect(AppStatus.Halted)
+        if (!ServiceManager.disconnect(this)) {
+            expectedStatus = null
+        }
+        connectedByMonitor = false
+    }
+
+    private fun expect(status: AppStatus) {
+        expectedStatus = status
+        expectedStatusTime = System.currentTimeMillis()
+    }
+
+    private fun onStatusChanged(status: AppStatus) {
+        val expected = expectedStatus == status &&
+            System.currentTimeMillis() - expectedStatusTime < OWN_ACTION_WINDOW_MS
+        if (expected) {
+            expectedStatus = null
+            return
+        }
+
+        // Not caused by the monitor: the user (or another app) changed the connection
+        Log.i(TAG, "Connection changed to $status by the user")
+        connectedByMonitor = false
+        if (sessionActive) {
+            userOverride = true
+        }
+    }
+
+    /** Null means never disconnect. */
+    private fun getDisconnectDelayMs(): Long? {
+        val seconds = getPreferences()
+            .getString("auto_connect_disconnect_delay", "15")
+            ?.toLongOrNull() ?: 15L
+        return if (seconds < 0) null else seconds * 1000L
+    }
+
+    private fun isAllowedOnCurrentNetwork(): Boolean {
+        val mobileOnly = getPreferences().getBoolean("auto_connect_mobile_only", false)
+        return !mobileOnly || !isOnWifi()
     }
 
     private fun isOnWifi(): Boolean {
@@ -259,92 +356,6 @@ class AppMonitorService : LifecycleService() {
         } else {
             @Suppress("DEPRECATION")
             cm.activeNetworkInfo?.type == ConnectivityManager.TYPE_WIFI
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun getCurrentSsid(): String? {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10+: get SSID from NetworkCapabilities
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                val network = cm?.activeNetwork ?: return null
-                val caps = cm.getNetworkCapabilities(network) ?: return null
-                // TransportInfo contains WifiInfo on Android 10+
-                val wifiInfo = caps.transportInfo
-                if (wifiInfo is android.net.wifi.WifiInfo) {
-                    wifiInfo.ssid?.removeSurrounding("\"")
-                } else null
-            } else {
-                @Suppress("DEPRECATION")
-                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                @Suppress("DEPRECATION")
-                wm?.connectionInfo?.ssid?.removeSurrounding("\"")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to get SSID", e)
-            null
-        }
-    }
-
-    private fun getForegroundPackage(): String? {
-        val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
-            ?: return null
-
-        val endTime = System.currentTimeMillis()
-        val beginTime = endTime - 5000
-
-        val usageStats = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_BEST,
-            beginTime,
-            endTime
-        )
-
-        if (usageStats.isNullOrEmpty()) return null
-
-        return usageStats
-            .filter { it.lastTimeUsed > 0 && !isSystemUiPackage(it.packageName) }
-            .maxByOrNull { it.lastTimeUsed }
-            ?.packageName
-    }
-
-    /**
-     * Returns true for system overlay packages that should not affect
-     * foreground detection: notification panel, launchers, recents, etc.
-     * We check if the package has a launcher activity — if not, it's a
-     * system overlay (like SystemUI) and we ignore it.
-     */
-    private fun isSystemUiPackage(packageName: String): Boolean {
-        // Always ignore own package
-        if (packageName == this.packageName) return true
-
-        // Always ignore known system UI packages across OEMs
-        val knownSystemUi = setOf(
-            "com.android.systemui",
-            "com.android.launcher",
-            "com.android.launcher2",
-            "com.android.launcher3",
-            "com.google.android.apps.nexuslauncher",
-            "com.samsung.android.app.spage",
-            "com.samsung.android.app.cocktailbarservice",
-            "com.sec.android.app.launcher",
-            "com.huawei.android.launcher",
-            "com.miui.home",
-            "com.oneplus.launcher",
-            "com.oppo.launcher",
-            "com.vivo.launcher"
-        )
-        if (packageName in knownSystemUi) return true
-
-        // For any other package: check if it has a launcher activity.
-        // System overlays (notification shade, recents, etc.) typically don't.
-        return try {
-            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
-                .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-                .setPackage(packageName)
-            packageManager.queryIntentActivities(intent, 0).isEmpty()
-        } catch (_: Exception) {
-            false
         }
     }
 
@@ -363,7 +374,16 @@ class AppMonitorService : LifecycleService() {
         }
     }
 
-    private fun startForegroundNotification() {
+    /** Shows a problem that keeps auto-connect from working in the notification, or clears it. */
+    private fun showProblem(@StringRes problem: Int?) {
+        if (problem == shownProblem) return
+        shownProblem = problem
+        problem?.let { Log.w(TAG, getString(it)) }
+        (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)
+            ?.notify(FOREGROUND_SERVICE_ID, createNotification())
+    }
+
+    private fun createNotification(): Notification {
         val appName = targetPackage?.let {
             try {
                 packageManager.getApplicationLabel(
@@ -372,20 +392,30 @@ class AppMonitorService : LifecycleService() {
             } catch (_: Exception) { it }
         } ?: "..."
 
-        val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        val problem = shownProblem
+        val contentIntent = when (problem) {
+            R.string.auto_connect_problem_usage_access ->
+                Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+            else ->
+                Intent(this, MainActivity::class.java)
+        }
+
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setSilent(true)
             .setContentTitle(getString(R.string.auto_connect_notification_title))
-            .setContentText(getString(R.string.auto_connect_notification_content, appName))
+            .setContentText(
+                if (problem != null) getString(problem)
+                else getString(R.string.auto_connect_notification_content, appName)
+            )
             .setContentIntent(
-                PendingIntent.getActivity(
-                    this, 0,
-                    Intent(this, MainActivity::class.java),
-                    PendingIntent.FLAG_IMMUTABLE
-                )
+                PendingIntent.getActivity(this, 0, contentIntent, PendingIntent.FLAG_IMMUTABLE)
             )
             .build()
+    }
 
+    private fun startForegroundNotification() {
+        val notification = createNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(FOREGROUND_SERVICE_ID, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {

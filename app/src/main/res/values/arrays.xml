@@ -20,6 +20,19 @@
         <item name="proxy">proxy</item>
     </array>
 
+    <string-array name="auto_connect_disconnect_delays">
+        <item>@string/auto_connect_disconnect_never</item>
+        <item>@string/auto_connect_disconnect_15s</item>
+        <item>@string/auto_connect_disconnect_1m</item>
+        <item>@string/auto_connect_disconnect_5m</item>
+    </string-array>
+    <string-array name="auto_connect_disconnect_delays_entries" translatable="false">
+        <item>-1</item>
+        <item>15</item>
+        <item>60</item>
+        <item>300</item>
+    </string-array>
+
     <array name="byedpi_desync_methods">
         <item name="none">None</item>
         <item name="split">Split</item>

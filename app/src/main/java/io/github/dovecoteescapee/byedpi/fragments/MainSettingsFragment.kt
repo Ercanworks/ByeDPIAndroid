@@ -1,13 +1,17 @@
 package io.github.dovecoteescapee.byedpi.fragments
 
-import android.app.AppOpsManager
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.preference.*
 import io.github.dovecoteescapee.byedpi.BuildConfig
@@ -98,7 +102,7 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
         autoConnectSwitch.setOnPreferenceChangeListener { _, newValue ->
             val enabled = newValue as Boolean
             if (enabled) {
-                if (!hasUsageStatsPermission()) {
+                if (!ServiceManager.hasUsageStatsPermission(requireContext())) {
                     Toast.makeText(requireContext(), R.string.usage_access_required, Toast.LENGTH_LONG).show()
                     startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                     return@setOnPreferenceChangeListener false
@@ -107,6 +111,7 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
                 if (pkg != null) {
                     ServiceManager.startMonitor(requireContext())
                 }
+                askToIgnoreBatteryOptimizations()
             } else {
                 ServiceManager.stopMonitor(requireContext())
             }
@@ -147,15 +152,33 @@ class MainSettingsFragment : PreferenceFragmentCompat() {
         appPicker.summary = appName ?: getString(R.string.auto_connect_app_picker_summary)
     }
 
-    @Suppress("DEPRECATION")
-    private fun hasUsageStatsPermission(): Boolean {
-        val appOps = requireContext().getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        val mode = appOps.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            android.os.Process.myUid(),
-            requireContext().packageName
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
+    /**
+     * Battery optimization (and Samsung's sleeping apps in particular) kills the
+     * monitor in the background, after which auto-connect silently stops working.
+     */
+    @SuppressLint("BatteryLife")
+    private fun askToIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val context = requireContext()
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (powerManager.isIgnoringBatteryOptimizations(context.packageName)) return
+
+        AlertDialog.Builder(context)
+            .setTitle(R.string.battery_optimization_title)
+            .setMessage(R.string.battery_optimization_message)
+            .setPositiveButton(R.string.battery_optimization_allow) { _, _ ->
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(Uri.parse("package:${context.packageName}"))
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Battery optimization request not supported", e)
+                    startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun updatePreferences() {

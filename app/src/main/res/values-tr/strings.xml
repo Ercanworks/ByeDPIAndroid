@@ -10,6 +10,7 @@
     <string name="auto_connect_mobile_only_summary">Wi-Fi\'dayken otomatik bağlanma</string>
     <string name="auto_connect_disconnect_delay_title">Uygulamadan çıkınca bağlantıyı kes</string>
     <string name="auto_connect_disconnect_never">Hiçbir zaman</string>
+    <string name="auto_connect_disconnect_5s">5 saniye sonra</string>
     <string name="auto_connect_disconnect_15s">15 saniye sonra</string>
     <string name="auto_connect_disconnect_1m">1 dakika sonra</string>
     <string name="auto_connect_disconnect_5m">5 dakika sonra</string>

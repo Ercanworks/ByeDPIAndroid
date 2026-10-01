@@ -81,6 +81,7 @@
     <string name="auto_connect_mobile_only_summary">Don\'t auto-connect while on WiFi</string>
     <string name="auto_connect_disconnect_delay_title">Disconnect after leaving the app</string>
     <string name="auto_connect_disconnect_never">Never</string>
+    <string name="auto_connect_disconnect_5s">After 5 seconds</string>
     <string name="auto_connect_disconnect_15s">After 15 seconds</string>
     <string name="auto_connect_disconnect_1m">After 1 minute</string>
     <string name="auto_connect_disconnect_5m">After 5 minutes</string>

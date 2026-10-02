@@ -18,6 +18,9 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          # Reuse downloaded dependencies between runs; downloading everything
+          # every time runs into Maven Central's rate limit (HTTP 429)
+          cache: 'gradle'
 
       - name: Build debug APK and run lint
         run: |
